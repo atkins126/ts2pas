@@ -16,6 +16,7 @@ type
     FImports: array of TImportDeclaration;
     FInterfaces: array of TInterfaceDeclaration;
 
+    function GetDeclarations: array of TAmbientDeclaration;
     function ReadAmbientDeclaration: TAmbientDeclaration;
     function ReadEnumerationItem: TEnumerationItem;
     function ReadEnumerationDeclaration: TEnumerationDeclaration;
@@ -381,11 +382,13 @@ begin
       end;
     TSyntaxKind.Identifier, TSyntaxKind.ThisKeyword:
       begin
-        Result := TNamedType.Create(Self as IDeclarationOwner, ReadIdentifierPath);
+        var NewType := TNamedType.Create(Self as IDeclarationOwner, ReadIdentifierPath);
+        Result := NewType;
+
         if CurrentToken = TSyntaxKind.LessThanToken then
         begin
           repeat
-            TNamedType(Result).Arguments.Add(ReadTypeArgument)
+            NewType.Arguments.Add(ReadTypeArgument)
           until CurrentToken <> TSyntaxKind.CommaToken;
           AssumeToken(TSyntaxKind.GreaterThanToken);
 
@@ -525,17 +528,22 @@ begin
 
   Result := ReadPrimaryType;
 
+  var UnionType: TUnionType := nil;
+
   while CurrentToken = TSyntaxKind.BarToken do
   begin
-    if not (Result is TUnionType) then
+    if not Assigned(UnionType) then
     begin
-      var OldType := Result;
-      Result := TUnionType.Create(Self as IDeclarationOwner);
-      TUnionType(Result).&Types.Add(OldType);
+      UnionType := TUnionType.Create(Self as IDeclarationOwner);
+
+      UnionType.&Types.Add(Result);
+
+      Result := UnionType;
     end;
 
     ReadToken(TypeTokens, True);
-    TUnionType(Result).Types.Add(ReadPrimaryType);
+
+    UnionType.Types.Add(ReadPrimaryType);
   end;
 end;
 
@@ -1959,7 +1967,7 @@ begin
     Result := Result + Import.AsCode;
 
   for var Module in FModules do
-    Result := Result + Module.AsCode;
+      Result := Result + Module.AsCode;
 
   if FInterfaces.Length > 0 then
   begin
@@ -1994,6 +2002,11 @@ begin
   end;
 
   Result := BuildPascalHeader;
+end;
+
+function TTranslator.GetDeclarations: array of TAmbientDeclaration;
+begin
+  Result := FDeclarations;
 end;
 
 end.

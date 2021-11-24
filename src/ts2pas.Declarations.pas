@@ -14,7 +14,11 @@ type
     amProtected
   );
 
+  TAmbientDeclaration = class;
+  TAmbientModuleDeclaration = class;
+
   IDeclarationOwner = interface
+    function GetDeclarations: array of TAmbientDeclaration;
   end;
 
   TCustomDeclaration = class
@@ -38,6 +42,7 @@ type
 
     property AsCode: String read GetAsCode;
     property NamespaceString: String read GetNamespaceString;
+    property Owner: IDeclarationOwner read FOwner;
   end;
 
   TNamedDeclaration = class(TCustomDeclaration)
@@ -162,17 +167,19 @@ type
   TNamedType = class(TCustomNamedType)
   private
     FName: String;
+
+    function FindNameInModule: TAmbientModuleDeclaration;
   protected
-    function GetName: String; override;
     function GetAsCode: String; override;
+    function GetName: String; override;
   public
     constructor Create(Owner: IDeclarationOwner; AName: String); reintroduce;
 
     function GetPromiseType: TCustomType; override;
     function IsPromise: Boolean; override;
 
-    property Name: String read GetName;
     property Arguments: array of TTypeArgument;
+    property Name: String read GetName;
   end;
 
   TExportDeclaration = class(TNamedDeclaration)
@@ -238,7 +245,6 @@ type
     property DefaultValue: string;
     property AsCode[OmitType: Boolean]: String read GetAsCodeOmitType;
   end;
-
 
   TIndexSignature = class(TCustomTypeMember)
   protected
@@ -350,14 +356,13 @@ type
   TTypeAlias = class(TNamedDeclaration)
   protected
     function GetAsCode: String; override;
-    function GetDeclaration(BreakLine: Boolean): String;
+    function GetDeclaration(ForwardDeclaration: Boolean): String;
   public
     function GetForwardDeclaration: String;
 
     property &Type: TCustomType;
     property &TypeParameters: array of TTypeParameter;
   end;
-
 
   TNamespaceDeclaration = class(TNamedDeclaration)
   protected
@@ -370,8 +375,6 @@ type
     property Interfaces: array of TInterfaceDeclaration;
     property Namespaces: array of TNamespaceDeclaration;
   end;
-
-
 
   TAmbientBinding  = class(TNamedDeclaration)
   protected
@@ -454,7 +457,11 @@ type
   TAmbientModuleDeclaration = class(TCustomDeclaration)
   protected
     function GetAsCode: String; override;
+    function GetModuleName: String;
+    function GetModuleTypeName: String;
   public
+    property ModuleName: String read GetModuleName;
+    property ModuleTypeName: String read GetModuleTypeName;
     property IdentifierPath: String;
     property Enums: array of TEnumerationDeclaration;
     property Variables: array of TAmbientVariableDeclaration;
@@ -757,14 +764,13 @@ begin
     Result += ': ' + ResultType.AsCode;
 end;
 
-
 { TNamedType }
 
 constructor TNamedType.Create(Owner: IDeclarationOwner; AName: String);
 begin
   inherited Create(Owner);
 
-  FName := AName
+  FName := AName;
 end;
 
 function TNamedType.GetName: String;
@@ -794,6 +800,11 @@ begin
     if ArgumentsValue <> '' then
       Result += '<' + ArgumentsValue + '>';
   end;
+
+  var Module := FindNameInModule;
+
+  if Assigned(Module) then
+    Result := Module.ModuleName + '.' + Result;
 end;
 
 function TNamedType.IsPromise: Boolean;
@@ -811,6 +822,16 @@ begin
     Result := &Type;
 end;
 
+function TNamedType.FindNameInModule: TAmbientModuleDeclaration;
+begin
+  Result := nil;
+
+  for var Declaration in Owner.GetDeclarations do
+    for var Module in Declaration.Modules do
+      for var AClass in Module.Classes do
+        if AClass.Name = Name then
+          Exit(Module);
+end;
 
 { TExportDeclaration }
 
@@ -818,7 +839,6 @@ function TExportDeclaration.GetAsCode: String;
 begin
   Result := '';
 end;
-
 
 { TAmbientDeclaration }
 
@@ -834,6 +854,7 @@ begin
   begin
     Result += 'type' + CRLF;
     BeginIndention;
+
     for var &Class in Classes do
       Result += &Class.AsCode;
     EndIndention;
@@ -847,14 +868,12 @@ begin
     Result += Namespace.AsCode;
 end;
 
-
 { TDefinitionDeclaration }
 
 function TDefinitionDeclaration.GetAsCode: String;
 begin
   Console.Log('not implemented: TDefinitionDeclaration.GetAsCode');
 end;
-
 
 { TEnumerationItem }
 
@@ -934,7 +953,7 @@ begin
   if IsStatic then
     Result += 'class ';
 
-  Result += 'constructor Create';
+  Result += 'constructor ' + {$IFDEF PAS2JS}'new'{$ELSE}'Create'{$ENDIF};
 
   if Assigned(&Type) then
     Result += &Type.AsCode;
@@ -1278,7 +1297,6 @@ begin
       // ensure that the current type is optional and that there is still some budget
         and (not ParameterList[0].IsOptional or (CurrentOptionalLevel < OptionalLevel));
 
-
       Result := '(' + ParameterList[0].AsCode[CanOmitType];
 
       for var Index := Low(ParameterList) + 1 to High(ParameterList) do
@@ -1382,27 +1400,10 @@ var
 
 begin
   ProcessedClasses := TW3ObjDictionary.Create;
-  Result := '//' + IdentifierPath + CRLF + CRLF;
-
-  var Constants := 0;
-  for var Variable in Variables do
-    if Variable.IsConst then
-      Inc(Constants);
-
-  if Constants > 0 then
-  begin
-    Result += 'const' + CRLF;
-    BeginIndention;
-    for var Variable in Variables do
-      if Variable.IsConst then
-        Result := Result + Variable.AsCode;
-    EndIndention;
-    Result += CRLF;
-  end;
 
   if Enums.Count + Classes.Count + Interfaces.Count > 0 then
   begin
-    Result += 'type' + CRLF;
+    Result += 'types' + CRLF;
     BeginIndention;
 
     for var Enum in Enums do
@@ -1415,11 +1416,19 @@ begin
     for var &Interface in Interfaces do
       Result += &Interface.GetForwardDeclaration;
 
+    Result += CRLF + ModuleTypeName + CRLF;
+
+    Result += GetIndentionString + 'public type' + CRLF;
+
+    BeginIndention;
+
     for var &Class in Classes do
     begin
       ProcessedClasses[&Class.Name] := &Class;
       Result += &Class.GetForwardDeclaration;
     end;
+
+    EndIndention;
 
     for var &Interface in Interfaces do
       Result += &Interface.AsCode;
@@ -1443,6 +1452,23 @@ begin
     Result += CRLF;
   end;
 
+  var Constants := 0;
+
+  for var Variable in Variables do
+    if Variable.IsConst then
+      Inc(Constants);
+
+  if Constants > 0 then
+  begin
+    Result += 'const' + CRLF;
+    BeginIndention;
+    for var Variable in Variables do
+      if Variable.IsConst then
+        Result := Result + Variable.AsCode;
+    EndIndention;
+    Result += CRLF;
+  end;
+
   if Variables.Count - Constants > 0 then
   begin
     Result += 'var' + CRLF;
@@ -1460,6 +1486,19 @@ begin
   Result += CRLF;
 end;
 
+function TAmbientModuleDeclaration.GetModuleTypeName: String;
+begin
+  Result := GetIndentionString + GetModuleName + ' = class external name ' + IdentifierPath;
+end;
+
+function TAmbientModuleDeclaration.GetModuleName: String;
+begin
+  var Values := Copy(IdentifierPath, 2, IdentifierPath.Length - 2).Split('.');
+
+  var MainModuleName := Values[0];
+
+  Result := 'T' + MainModuleName[1].ToUpper + Copy(MainModuleName, 2);
+end;
 
 { TClassDeclaration }
 
@@ -1579,15 +1618,15 @@ function TTypeAlias.GetAsCode: String;
 begin
   {$IFDEF DEBUG} Console.Log('Write type: ' + Name); {$ENDIF}
 
-  Result := GetDeclaration(True) + &Type.AsCode + ';' + CRLF + CRLF
+  Result := GetDeclaration(False) + &Type.AsCode + ';' + CRLF + CRLF
 end;
 
 function TTypeAlias.GetForwardDeclaration: String;
 begin
-  Result := GetDeclaration(False) + ';' + CRLF;
+  Result := GetDeclaration(True) + ';' + CRLF;
 end;
 
-function TTypeAlias.GetDeclaration(BreakLine: Boolean): String;
+function TTypeAlias.GetDeclaration(ForwardDeclaration: Boolean): String;
 begin
   var IsObject := &Type is TObjectType;
   Result := GetIndentionString;
@@ -1598,9 +1637,14 @@ begin
   Result += Name + ' = ';
 
   if IsObject then
+  begin
     Result += 'class';
 
-  if BreakLine then
+    if not ForwardDeclaration then
+      Result += ' external name ''Object'' (TJSObject)';
+  end;
+
+  if not ForwardDeclaration then
     Result += CRLF;
 end;
 
